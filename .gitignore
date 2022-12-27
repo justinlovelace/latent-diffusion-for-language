@@ -127,3 +127,9 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Additional Files
+**/saved_models
+**/saved_lm_models
+**/saved_cls_models
+*.pt
