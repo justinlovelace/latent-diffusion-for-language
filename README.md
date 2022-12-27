@@ -6,8 +6,6 @@ This is the official code release for
 
 by Justin Lovelace, Varsha Kishore, Chao Wan, Eliot Shekhtman, and Kilian Q. Weinberger
 
-[Paper](https://openreview.net/pdf?id=qsZoGvFiJn1)
-
 ![Figure](figures/method.png)
 
 ### Abstract
