@@ -1,3 +1,7 @@
+## Update 11/09/23
+
+This repo currently contains code to replicate the experiments from our original preprint ([arXiv v1](https://arxiv.org/abs/2212.09462v1), 12/19/22). An expanded version ([arXiv v2](https://arxiv.org/abs/2212.09462)) will be presented at NeurIPS 2023. Over the next few weeks, we will update the repo with code to replicate the experiments in our NeurIPS 2023 paper.
+
 # Latent Diffusion for Language Generation
 
 This is the official code release for
