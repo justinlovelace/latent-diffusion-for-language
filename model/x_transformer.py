@@ -830,6 +830,7 @@ class AttentionLayers(nn.Module):
         sandwich_norm = False,
         zero_init_branch_output = False,
         time_emb_dim = None,
+        num_dense_connections = 0,
         **kwargs
     ):
         super().__init__()
@@ -841,6 +842,7 @@ class AttentionLayers(nn.Module):
         self.dim = dim
         self.depth = depth
         self.layers = nn.ModuleList([])
+        self.num_dense_connections = num_dense_connections
 
         self.has_pos_emb = position_infused_attn or rel_pos_bias or rotary_pos_emb
         self.pia_pos_emb = FixedPositionalEmbedding(dim) if position_infused_attn else None
@@ -972,6 +974,8 @@ class AttentionLayers(nn.Module):
                 layer,
                 residual
             ]))
+        
+        self.dense_projections = nn.ModuleList([nn.Linear(dim*2, dim) for _ in range(num_dense_connections)])
 
         if deepnorm:
             init_gain = (8 * depth) ** -0.25
@@ -1002,10 +1006,17 @@ class AttentionLayers(nn.Module):
             max_rotary_emb_length = max(list(map(lambda m: (m.shape[1] if exists(m) else 0) + x.shape[1], mems)))
             rotary_pos_emb = self.rotary_pos_emb(max_rotary_emb_length, x.device)
 
+        dense_hiddens = []
+        attn_idx = 0
         for ind, (layer_type, (norm, block, residual_fn)) in enumerate(zip(self.layer_types, self.layers)):
             is_last = ind == (len(self.layers) - 1)
 
             if layer_type == 'a':
+                dense_idx = attn_idx - (self.num_attn_layers - self.num_dense_connections)
+                if dense_idx >= 0:
+                    assert len(dense_hiddens) > 0, 'dense connections must be in order'
+                    x = self.dense_projections[dense_idx](torch.cat([x, dense_hiddens.pop()], dim=-1))
+                attn_idx += 1
                 if return_hiddens:
                     hiddens.append(x)
                 layer_mem = mems.pop(0) if mems else None
@@ -1043,6 +1054,9 @@ class AttentionLayers(nn.Module):
 
             if exists(post_main_norm):
                 x = post_main_norm(x)
+            
+            if layer_type == 'f' and len(dense_hiddens) < self.num_dense_connections:
+                dense_hiddens.append(x)
 
         if return_hiddens:
             intermediates = LayerIntermediates(

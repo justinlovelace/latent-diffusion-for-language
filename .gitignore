@@ -129,7 +129,6 @@ dmypy.json
 .pyre/
 
 # Additional Files
-**/saved_models
-**/saved_lm_models
-**/saved_cls_models
+**/saved_diff_models
+**/saved_latent_models
 *.pt

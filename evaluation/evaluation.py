@@ -62,21 +62,61 @@ def compute_memorization(all_texts_list, human_references, n=4):
 
 def compute_mauve(all_texts_list, human_references, model_id):
     torch.cuda.empty_cache() 
-    assert model_id in {'gpt2-large', 'all-mpnet-base-v2'}
+    assert model_id == 'gpt2-large'
     mauve = load("mauve")
-    assert len(all_texts_list) == len(human_references)
 
-    if model_id == 'all-mpnet-base-v2':
-        model = SentenceTransformer(model_id).cuda()
-        #Sentences are encoded by calling model.encode()
-        all_texts_list_embedding = model.encode(all_texts_list)
-        human_references_embedding = model.encode(human_references)
-        results = mauve.compute(predictions=all_texts_list, p_features=all_texts_list_embedding, references=human_references, q_features=human_references_embedding, featurize_model_name=model_id, max_text_length=256, device_id=0, mauve_scaling_factor=8,)
-    elif model_id == 'gpt2-large':
-        results = mauve.compute(predictions=all_texts_list, references=human_references, featurize_model_name=model_id, max_text_length=256, device_id=0)
-    else:
-        raise NotImplementedError
+    results = mauve.compute(predictions=all_texts_list, references=human_references, featurize_model_name=model_id, max_text_length=256, device_id=0)
+
+    assert len(all_texts_list) == len(human_references)
     
     return results.mauve, results.divergence_curve
 
+def compute_bleu(all_texts_list, human_references):
+    bleu = load("bleu")
+
+    human_references = [[ref] for ref in human_references]
+    results = bleu.compute(predictions=all_texts_list, references=human_references)
     
+    return results['bleu']
+
+def compute_sacrebleu(all_texts_list, human_references, tokenize, use_effective_order=False):
+    sacrebleu = load("sacrebleu")
+
+    human_references = [[ref] for ref in human_references]
+    results = sacrebleu.compute(predictions=all_texts_list, references=human_references, tokenize=tokenize, use_effective_order=use_effective_order)
+    
+    return results['score']
+
+def compute_debertascore(all_texts_list, human_references):
+    bert = load("bertscore")
+
+    human_references = [[ref] for ref in human_references]
+    results = bert.compute(predictions=all_texts_list, references=human_references, lang="en", model_type='microsoft/deberta-xlarge-mnli')
+
+    del results['hashcode']
+    for key, value in results.items():
+        results[key] = np.asarray(value).mean()
+    
+    return results
+    
+
+def compute_bertscore(all_texts_list, human_references):
+    bert = load("bertscore")
+
+    human_references = [[ref] for ref in human_references]
+    results = bert.compute(predictions=all_texts_list, references=human_references, lang="en", rescale_with_baseline=True)
+
+    del results['hashcode']
+    for key, value in results.items():
+        results[key] = np.asarray(value).mean()
+    
+    return results
+
+def compute_rouge(all_texts_list, human_references, use_aggregator=True, use_stemmer=False):
+    rouge = load("rouge")
+
+    human_references = [[ref] for ref in human_references]
+    results = rouge.compute(predictions=all_texts_list, references=human_references, use_aggregator=use_aggregator, use_stemmer=use_stemmer)
+    
+    return results
+

@@ -57,6 +57,41 @@ class SinusoidalPosEmb(nn.Module):
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
 
+class LearnedSinusoidalPosEmb(nn.Module):
+    """ following @crowsonkb 's lead with learned sinusoidal pos emb """
+    """ https://github.com/crowsonkb/v-diffusion-jax/blob/master/diffusion/models/danbooru_128.py#L8 """
+
+    def __init__(self, dim):
+        super().__init__()
+        assert (dim % 2) == 0
+        half_dim = dim // 2
+        self.weights = nn.Parameter(torch.randn(half_dim))
+
+    def forward(self, x):
+        x = rearrange(x, 'b -> b 1')
+        freqs = x * rearrange(self.weights, 'd -> 1 d') * 2 * math.pi
+        fouriered = torch.cat((freqs.sin(), freqs.cos()), dim = -1)
+        fouriered = torch.cat((x, fouriered), dim = -1)
+        return fouriered
+
+class VariationalFourierFeatures(nn.Module):
+    """ following https://arxiv.org/abs/2107.00630 """
+
+    def __init__(self, n_min=0, n_max=8):
+        super().__init__()
+        assert n_min <= n_max
+        self.n_min = n_min
+        self.n_max = n_max
+
+    def forward(self, x):
+        fourier_features = []
+        for n in range(self.n_min, self.n_max+1):
+            freqs = x * (2**n) * math.pi
+            fourier_features.extend([freqs.sin(), freqs.cos()])
+        fouriered = rearrange(fourier_features, 'n b l d -> b l d n')
+        return fouriered
+
+# TODO
 class DiffusionTransformer(nn.Module):
     def __init__(
         self,
@@ -71,6 +106,11 @@ class DiffusionTransformer(nn.Module):
         class_conditional=False,
         num_classes=0,
         class_unconditional_prob=0,
+        seq2seq=False,
+        seq2seq_context_dim=0,
+        dual_output=False,
+        num_dense_connections=0,
+        dense_output_connection=False,
     ):
         super().__init__()
 
@@ -81,17 +121,21 @@ class DiffusionTransformer(nn.Module):
         self.class_conditional = class_conditional
         self.num_classes = num_classes
         self.class_unconditional_prob = class_unconditional_prob
+        self.seq2seq = seq2seq
+        self.dense_output_connection = dense_output_connection
+        
 
         self.max_seq_len = max_seq_len
 
         # time embeddings
 
         sinu_pos_emb = SinusoidalPosEmb(tx_dim)
+        fourier_dim = tx_dim
 
         time_emb_dim = tx_dim*4
         self.time_mlp = nn.Sequential(
             sinu_pos_emb,
-            nn.Linear(tx_dim, time_emb_dim),
+            nn.Linear(fourier_dim, time_emb_dim),
             nn.GELU(),
             nn.Linear(time_emb_dim, time_emb_dim)
         )
@@ -102,7 +146,7 @@ class DiffusionTransformer(nn.Module):
 
         self.pos_emb = AbsolutePositionalEmbedding(tx_dim, max_seq_len)
         
-        self.cross = (self_condition or class_conditional)
+        self.cross = seq2seq
 
         self.encoder = Encoder(
             dim=tx_dim,
@@ -110,57 +154,73 @@ class DiffusionTransformer(nn.Module):
             heads=heads,
             attn_dropout = dropout,    # dropout post-attention
             ff_dropout = dropout,       # feedforward dropout
-            rel_pos_bias=True,
+            rel_pos_bias=False,
             ff_glu=True,
             cross_attend=self.cross,
             time_emb_dim=tx_dim*4 if self.scale_shift else None,
+            num_dense_connections=num_dense_connections,
         )
-        if self_condition:
-            self.null_embedding = nn.Embedding(1, tx_dim)
-            self.context_proj = nn.Linear(latent_dim, tx_dim)
         if self.class_conditional:
             assert num_classes > 0
-            self.class_embedding = nn.Embedding(num_classes+1, tx_dim)
+            self.class_embedding = nn.Sequential(nn.Embedding(num_classes+1, tx_dim),
+                                                    nn.Linear(tx_dim, time_emb_dim))
+        if self.seq2seq:
+            self.null_embedding_seq2seq = nn.Embedding(1, tx_dim)
+            self.seq2seq_proj = nn.Linear(seq2seq_context_dim, tx_dim)
         
-        self.input_proj = nn.Linear(latent_dim, tx_dim)
+        if self.self_condition:
+            self.input_proj = nn.Linear(latent_dim*2, tx_dim)
+            self.init_self_cond = nn.Parameter(torch.randn(1, latent_dim))
+            nn.init.normal_(self.init_self_cond, std = 0.02)
+        else:
+            self.input_proj = nn.Linear(latent_dim, tx_dim)
         self.norm = nn.LayerNorm(tx_dim)
-        self.output_proj = nn.Linear(tx_dim, latent_dim)
+        self.output_proj = nn.Linear(tx_dim*2 if dense_output_connection else tx_dim, latent_dim*2 if dual_output else latent_dim)
 
         init_zero_(self.output_proj)
 
-    def forward(self, x, mask, time, x_self_cond = None, class_id = None):
+    def forward(self, x, mask, time, x_self_cond = None, class_id = None, seq2seq_cond = None, seq2seq_mask = None):
         """
         x: input, [batch, length, latent_dim]
         mask: bool tensor where False indicates masked positions, [batch, length] 
         time: timestep, [batch]
         """
 
-        time_emb = self.time_mlp(time)
+        time_emb = self.time_mlp(time*1000)
 
         time_emb = rearrange(time_emb, 'b d -> b 1 d')
 
+        if self.class_conditional:
+            assert exists(class_id)
+            class_emb = self.class_embedding(class_id)
+            class_emb = rearrange(class_emb, 'b d -> b 1 d')
+            time_emb = time_emb + class_emb
+
         pos_emb = self.pos_emb(x)
 
-        tx_input = self.input_proj(x) + pos_emb + self.time_pos_embed_mlp(time_emb)
+        if self.self_condition:
+            if exists(x_self_cond):
+                x = torch.cat((x, x_self_cond), dim=-1)
+            else:
+                repeated_x_self_cond = repeat(self.init_self_cond, '1 d -> b l d', b=x.shape[0], l=x.shape[1])
+                x = torch.cat((x, repeated_x_self_cond), dim=-1)
+
+        x_input = self.input_proj(x)
+        tx_input = x_input + pos_emb + self.time_pos_embed_mlp(time_emb)
 
         if self.cross:
             context, context_mask = [], []
-            if self.self_condition:
-                if x_self_cond is None:
-                    null_context = repeat(self.null_embedding.weight, '1 d -> b 1 d', b=x.shape[0])
+            if self.seq2seq:
+                if seq2seq_cond is None:
+                    null_context = repeat(self.null_embedding_seq2seq.weight, '1 d -> b 1 d', b=x.shape[0])
                     context.append(null_context)
                     context_mask.append(torch.tensor([[True] for _ in range(x.shape[0])], dtype=bool, device=x.device))
-                else: 
-                    context.append(self.context_proj(x_self_cond))
-                    context_mask.append(mask)
-            if self.class_conditional:
-                assert exists(class_id)
-                class_emb = self.class_embedding(class_id)
-                class_emb = rearrange(class_emb, 'b d -> b 1 d')
-                context.append(class_emb)
-                context_mask.append(torch.tensor([[True] for _ in range(x.shape[0])], dtype=bool, device=x.device))
+                else:
+                    context.append(self.seq2seq_proj(seq2seq_cond))
+                    context_mask.append(seq2seq_mask)
             context = torch.cat(context, dim=1)
             context_mask = torch.cat(context_mask, dim=1)
+            
             x = self.encoder(tx_input, mask=mask, context=context, context_mask=context_mask, time_emb=time_emb)
         else:
             x = self.encoder(tx_input, mask=mask, time_emb=time_emb)
