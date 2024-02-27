@@ -50,7 +50,7 @@ After this is trained, you can then train a latent diffusion model with
 To evaluate a trained model on the validation set, see the `scripts/diffusion/eval.sh` script for an example. The `--resume_dir` argument should be updated with the path of a trained model. Different sampling configurations can be explored by changing the `{num_samples, sampling_timesteps, sampler}` arguments. Running the evaluation on the test set can be done by using the `--eval_test` flag.
 
 ## Contact
-Please open an issue if you have any questions about using this repo. I will be updating the repo with the code for the classification experiment and the autoregressive baseline after the holiday season.
+Please open an issue if you have any questions about using this repo. I will following up with reference scripts for some of the other experimental settings.
 
 
 ## Acknowledgement
